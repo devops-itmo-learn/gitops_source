@@ -1,0 +1,13 @@
+server:
+  port: 8080
+
+
+spring:
+  application:
+    name: demo-app
+
+
+logging:
+  level:
+    root: INFO
+    org.springframework.web: DEBUG
