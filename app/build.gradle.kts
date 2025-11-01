@@ -24,4 +24,14 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    outputs.cacheIf { true }
+}
+
+tasks.withType<JavaCompile> {
+    options.isFork = true
+    options.isIncremental = true
+}
+
+tasks.withType<Jar> {
+    outputs.cacheIf { true }
 }
