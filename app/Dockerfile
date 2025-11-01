@@ -3,18 +3,24 @@ FROM eclipse-temurin:21-jdk-alpine AS build
 
 WORKDIR /app
 
-RUN apk add --no-cache curl
+COPY gradle/ gradle/
+COPY gradlew gradlew.bat build.gradle.kts settings.gradle.kts gradle.properties ./
 
-COPY . .
+RUN chmod +x ./gradlew
 
-RUN chmod +x ./gradlew && ./gradlew bootJar
+RUN ./gradlew dependencies --no-daemon
+
+COPY src/ src/
+
+RUN ./gradlew bootJar --no-daemon
 
 # Runtime stage
 FROM eclipse-temurin:21-jre-alpine
 
 WORKDIR /app
 
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN apk add --no-cache curl && \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
 
 COPY --from=build /app/build/libs/*.jar app.jar
 
