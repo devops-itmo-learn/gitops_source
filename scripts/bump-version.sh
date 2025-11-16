@@ -73,7 +73,7 @@ case "$action" in
     ;;
   none)
     ;;
- esac
+esac
 
 NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 
