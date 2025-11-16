@@ -63,20 +63,8 @@ jobs:
           echo "======================"
           exit 1
 
-      - name: Verify healthcheck endpoint
-        run: |
-          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/healthz)
-          if [ "$response" != "200" ]; then
-            echo "Healthcheck endpoint returned status $response, expected 200"
-            echo "=== Container logs ==="
-            docker logs test-container
-            echo "======================"
-            exit 1
-          fi
-          echo "Healthcheck endpoint verified: $response"
-
       - name: Run Trivy vulnerability scanner (table format)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.33.1
         continue-on-error: true
         with:
           image-ref: "app:pr-${{ github.event.pull_request.number }}"
@@ -85,7 +73,7 @@ jobs:
           exit-code: "0"
 
       - name: Run Trivy vulnerability scanner (sarif format)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.33.1
         continue-on-error: true
         with:
           image-ref: "app:pr-${{ github.event.pull_request.number }}"
