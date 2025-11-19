@@ -1,0 +1,164 @@
+name: main-release
+# Workflow for releasing images to Docker Hub
+
+on:
+  push:
+    branches:
+      - main
+  workflow_call:
+    secrets:
+      DOCKER_USERNAME:
+        required: true
+      DOCKER_PASSWORD:
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      packages: write
+      security-events: write
+
+    env:
+      REGISTRY: docker.io
+      DOCKER_REPO: gitopsitmo/gitops-app
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare image metadata
+        id: image_meta
+        run: |
+          image_name="${REGISTRY}/${DOCKER_REPO}"
+          echo "IMAGE_NAME=${image_name}" >> "$GITHUB_ENV"
+          echo "name=${image_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Locate merged pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr_number="$(gh api repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls --jq '.[0].number' || true)"
+          if [[ -z "${pr_number}" ]]; then
+            echo "Unable to find the merged pull request for commit ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          echo "number=${pr_number}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve version label
+        id: version_label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          label="$(gh api repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER} --jq '.labels[].name' | grep '^version:' | head -n 1 || true)"
+          if [[ -z "${label}" ]]; then
+            label="version:patch"
+          fi
+
+          action="${label#version:}"
+          case "${action}" in
+            major|minor|patch|none)
+              ;;
+            *)
+              action="patch"
+              ;;
+          esac
+
+          echo "label=${label}" >> "$GITHUB_OUTPUT"
+          echo "action=${action}" >> "$GITHUB_OUTPUT"
+
+      - name: Bump VERSION
+        id: bump
+        run: |
+          chmod +x scripts/bump-version.sh
+          scripts/bump-version.sh "${{ steps.version_label.outputs.action }}"
+          new_version="$(tr -d '\n' < VERSION)"
+          echo "value=${new_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login "${{ env.REGISTRY }}" -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Build Docker image
+        run: |
+          docker build -t "${{ steps.image_meta.outputs.name }}:${{ steps.bump.outputs.value }}" ./app
+
+      - name: Start container
+        run: |
+          docker run -d -p 8080:8080 --name release-test "${{ steps.image_meta.outputs.name }}:${{ steps.bump.outputs.value }}"
+          echo "Container started, waiting for healthcheck..."
+
+      - name: Wait for healthcheck
+        run: |
+          max_attempts=30
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            if curl -f http://localhost:8080/healthz; then
+              echo "Healthcheck passed!"
+              exit 0
+            fi
+            echo "Waiting for healthcheck... (attempt $(( attempt+1 ))/$max_attempts)"
+            sleep 3
+            attempt=$(( attempt+1 ))
+          done
+          echo "Healthcheck failed after $max_attempts attempts"
+          echo "=== Container logs ==="
+          docker logs release-test
+          echo "======================"
+          exit 1
+
+      - name: Run Trivy vulnerability scanner (table)
+        uses: aquasecurity/trivy-action@0.33.1
+        continue-on-error: true
+        with:
+          image-ref: "${{ steps.image_meta.outputs.name }}:${{ steps.bump.outputs.value }}"
+          format: 'table'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+          exit-code: '0'
+
+      - name: Run Trivy vulnerability scanner (sarif)
+        uses: aquasecurity/trivy-action@0.33.1
+        continue-on-error: true
+        with:
+          image-ref: "${{ steps.image_meta.outputs.name }}:${{ steps.bump.outputs.value }}"
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Cleanup container
+        if: always()
+        run: |
+          docker stop release-test || true
+          docker rm release-test || true
+
+      - name: Push Docker image
+        run: |
+          docker push "${{ steps.image_meta.outputs.name }}:${{ steps.bump.outputs.value }}"
+
+      - name: Commit VERSION bump
+        run: |
+          if git diff --quiet -- VERSION; then
+            echo "No VERSION changes to commit"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.value }} [skip ci]"
+          git push origin HEAD
