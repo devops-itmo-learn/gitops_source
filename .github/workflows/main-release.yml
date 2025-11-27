@@ -7,9 +7,9 @@ on:
       - main
   workflow_call:
     secrets:
-      DOCKER_USERNAME:
+      DOCKERHUB_USERNAME:
         required: true
-      DOCKER_PASSWORD:
+      DOCKERHUB_TOKEN:
         required: true
 
 jobs:
@@ -86,7 +86,7 @@ jobs:
 
       - name: Log in to Docker Hub
         run: |
-          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login "${{ env.REGISTRY }}" -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login "${{ env.REGISTRY }}" -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
       - name: Build Docker image
         run: |
