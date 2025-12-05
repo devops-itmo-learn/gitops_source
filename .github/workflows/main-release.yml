@@ -20,6 +20,7 @@ jobs:
       contents: write
       packages: write
       security-events: write
+      pull-requests: write
 
     env:
       REGISTRY: docker.io
@@ -174,5 +175,10 @@ jobs:
           if [[ -n "$existing_pr" ]]; then
             echo "Pull request already exists (#${existing_pr}), skipping creation"
           else
-            gh pr create --base main --head "$branch" --title "$pr_title" --body "$pr_body"
+            if gh pr create --base main --head "$branch" --title "$pr_title" --body "$pr_body"; then
+              echo "Pull request created successfully"
+            else
+              echo "Warning: failed to create pull request automatically (likely due to insufficient permissions)."
+              echo "Please open a PR manually for branch ${branch} if required."
+            fi
           fi
