@@ -1,0 +1,151 @@
+name: sync-version-to-manifests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+  workflow_dispatch:
+
+jobs:
+  propagate-version:
+    name: Propagate application version to GitOps manifests
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    env:
+      MANIFESTS_CONFIG_FILE: .github/gitops-manifests.env
+      MANIFESTS_PATH: gitops-manifests
+
+    steps:
+      - name: Checkout application repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read target application version
+        id: version
+        run: |
+          value="$(tr -d '\n' < VERSION)"
+          if [[ -z "$value" ]]; then
+            echo "::error::VERSION file is empty" >&2
+            exit 1
+          fi
+          echo "value=${value}" >> "$GITHUB_OUTPUT"
+
+      - name: Load manifest sync configuration
+        id: config
+        run: |
+          if [[ ! -f "${MANIFESTS_CONFIG_FILE}" ]]; then
+            echo "::error::Missing ${MANIFESTS_CONFIG_FILE}." >&2
+            exit 1
+          fi
+
+          # shellcheck disable=SC1090
+          source "${MANIFESTS_CONFIG_FILE}"
+
+          if [[ -z "${MANIFESTS_REPOSITORY}" ]]; then
+            echo "::error::MANIFESTS_REPOSITORY must be set in ${MANIFESTS_CONFIG_FILE}." >&2
+            exit 1
+          fi
+
+          if [[ -z "${MANIFESTS_BASE_BRANCH}" ]]; then
+            MANIFESTS_BASE_BRANCH='main'
+          fi
+
+          if [[ -z "${MANIFESTS_IMAGE_TAG_PATH}" ]]; then
+            MANIFESTS_IMAGE_TAG_PATH='.image.tag'
+          fi
+
+          if [[ -z "${MANIFESTS_IMAGE_FILES}" ]]; then
+            echo "::error::MANIFESTS_IMAGE_FILES must list target files in ${MANIFESTS_CONFIG_FILE}." >&2
+            exit 1
+          fi
+
+          echo "repository=${MANIFESTS_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "base=${MANIFESTS_BASE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "files=${MANIFESTS_IMAGE_FILES}" >> "$GITHUB_OUTPUT"
+          echo "tag-path=${MANIFESTS_IMAGE_TAG_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout manifests repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.config.outputs.repository }}
+          token: ${{ secrets.MANIFESTS_REPO_PAT }}
+          path: ${{ env.MANIFESTS_PATH }}
+          fetch-depth: 0
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.2/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Update manifests with the new image tag
+        id: mutate
+        working-directory: ${{ env.MANIFESTS_PATH }}
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.value }}
+          TARGET_FILES: ${{ steps.config.outputs.files }}
+          IMAGE_TAG_PATH: ${{ steps.config.outputs['tag-path'] }}
+          TARGET_REPO: ${{ steps.config.outputs.repository }}
+        run: |
+          IFS=',' read -ra targets <<< "${TARGET_FILES}"
+          if [[ ${#targets[@]} -eq 0 ]]; then
+            echo "::error::MANIFESTS_IMAGE_FILES does not contain any valid entries" >&2
+            exit 1
+          fi
+
+          changed=0
+          for file in "${targets[@]}"; do
+            file="$(echo "$file" | xargs)"
+            if [[ -z "$file" ]]; then
+              continue
+            fi
+
+            if [[ ! -f "$file" ]]; then
+              echo "::error::File '$file' not found inside ${TARGET_REPO}" >&2
+              exit 1
+            fi
+
+            before="$(sha256sum "$file" | cut -d' ' -f1)"
+            yq -i "${IMAGE_TAG_PATH} = strenv(NEW_VERSION)" "$file"
+            after="$(sha256sum "$file" | cut -d' ' -f1)"
+
+            if [[ "$before" != "$after" ]]; then
+              echo "Updated $file"
+              changed=1
+            else
+              echo "${file} already up to date"
+            fi
+          done
+
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update pull request in manifests repository
+        if: steps.mutate.outputs.changed == '1'
+        id: cpr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.MANIFESTS_REPO_PAT }}
+          path: ${{ env.MANIFESTS_PATH }}
+          branch: ci/app-version-${{ steps.version.outputs.value }}-${{ github.run_id }}
+          base: ${{ steps.config.outputs.base }}
+          commit-message: "chore: bump app image tag to ${{ steps.version.outputs.value }}"
+          title: "chore: bump app image tag to ${{ steps.version.outputs.value }}"
+          body: |
+            Automated update triggered by `${{ github.workflow }}` in `${{ github.repository }}`.
+            - Source commit: `${{ github.sha }}`
+            - New application version: `${{ steps.version.outputs.value }}`
+
+      - name: No changes detected
+        if: steps.mutate.outputs.changed != '1'
+        run: echo "Manifest repository already up to date"
+
+      - name: Summarize result
+        if: steps.cpr.outputs.pull-request-url != ''
+        run: |
+          echo "Created PR: ${{ steps.cpr.outputs.pull-request-url }}"
