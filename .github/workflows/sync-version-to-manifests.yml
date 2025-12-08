@@ -6,6 +6,10 @@ on:
       - main
     paths:
       - VERSION
+  workflow_call:
+    secrets:
+      ORGANIZATION_PAT:
+        required: true
   workflow_dispatch:
 
 jobs:
@@ -75,7 +79,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.config.outputs.repository }}
-          token: ${{ secrets.MANIFESTS_REPO_PAT }}
+          token: ${{ secrets.ORGANIZATION_PAT }}
           path: ${{ env.MANIFESTS_PATH }}
           fetch-depth: 0
 
@@ -130,7 +134,7 @@ jobs:
         id: cpr
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.MANIFESTS_REPO_PAT }}
+          token: ${{ secrets.ORGANIZATION_PAT }}
           path: ${{ env.MANIFESTS_PATH }}
           branch: ci/app-version-${{ steps.version.outputs.value }}-${{ github.run_id }}
           base: ${{ steps.config.outputs.base }}
