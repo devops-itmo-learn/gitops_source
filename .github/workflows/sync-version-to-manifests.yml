@@ -6,6 +6,10 @@ on:
       - main
     paths:
       - VERSION
+  workflow_call:
+    secrets:
+      ORGANIZATION_PAT:
+        required: true
   workflow_dispatch:
 
 jobs:
@@ -57,25 +61,24 @@ jobs:
             MANIFESTS_BASE_BRANCH='main'
           fi
 
-          if [[ -z "${MANIFESTS_IMAGE_TAG_PATH}" ]]; then
-            MANIFESTS_IMAGE_TAG_PATH='.image.tag'
-          fi
-
-          if [[ -z "${MANIFESTS_IMAGE_FILES}" ]]; then
-            echo "::error::MANIFESTS_IMAGE_FILES must list target files in ${MANIFESTS_CONFIG_FILE}." >&2
+          if [[ -z "${MANIFESTS_TARGETS}" ]]; then
+            echo "::error::MANIFESTS_TARGETS must be set in ${MANIFESTS_CONFIG_FILE}." >&2
             exit 1
           fi
 
           echo "repository=${MANIFESTS_REPOSITORY}" >> "$GITHUB_OUTPUT"
           echo "base=${MANIFESTS_BASE_BRANCH}" >> "$GITHUB_OUTPUT"
-          echo "files=${MANIFESTS_IMAGE_FILES}" >> "$GITHUB_OUTPUT"
-          echo "tag-path=${MANIFESTS_IMAGE_TAG_PATH}" >> "$GITHUB_OUTPUT"
+          {
+            echo "targets<<EOF"
+            echo "${MANIFESTS_TARGETS}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout manifests repository
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.config.outputs.repository }}
-          token: ${{ secrets.MANIFESTS_REPO_PAT }}
+          token: ${{ secrets.ORGANIZATION_PAT }}
           path: ${{ env.MANIFESTS_PATH }}
           fetch-depth: 0
 
@@ -89,20 +92,28 @@ jobs:
         working-directory: ${{ env.MANIFESTS_PATH }}
         env:
           NEW_VERSION: ${{ steps.version.outputs.value }}
-          TARGET_FILES: ${{ steps.config.outputs.files }}
-          IMAGE_TAG_PATH: ${{ steps.config.outputs['tag-path'] }}
+          TARGETS: ${{ steps.config.outputs.targets }}
           TARGET_REPO: ${{ steps.config.outputs.repository }}
         run: |
-          IFS=',' read -ra targets <<< "${TARGET_FILES}"
-          if [[ ${#targets[@]} -eq 0 ]]; then
-            echo "::error::MANIFESTS_IMAGE_FILES does not contain any valid entries" >&2
+          if [[ -z "${TARGETS}" ]]; then
+            echo "::error::MANIFESTS_TARGETS is empty" >&2
             exit 1
           fi
 
           changed=0
-          for file in "${targets[@]}"; do
-            file="$(echo "$file" | xargs)"
-            if [[ -z "$file" ]]; then
+          while IFS= read -r line; do
+            if [[ -z "$line" ]]; then continue; fi
+            file="${line%%:::*}"
+            expression="${line#*:::}"
+            
+            # Trim whitespace
+            file="${file#"${file%%[![:space:]]*}"}"
+            file="${file%"${file##*[![:space:]]}"}"
+            
+            expression="${expression#"${expression%%[![:space:]]*}"}"
+            expression="${expression%"${expression##*[![:space:]]}"}"
+
+            if [[ -z "$file" || -z "$expression" ]]; then
               continue
             fi
 
@@ -112,7 +123,7 @@ jobs:
             fi
 
             before="$(sha256sum "$file" | cut -d' ' -f1)"
-            yq -i "${IMAGE_TAG_PATH} = strenv(NEW_VERSION)" "$file"
+            yq -i "${expression}" "$file"
             after="$(sha256sum "$file" | cut -d' ' -f1)"
 
             if [[ "$before" != "$after" ]]; then
@@ -121,7 +132,7 @@ jobs:
             else
               echo "${file} already up to date"
             fi
-          done
+          done <<< "${TARGETS}"
 
           echo "changed=${changed}" >> "$GITHUB_OUTPUT"
 
@@ -130,7 +141,7 @@ jobs:
         id: cpr
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.MANIFESTS_REPO_PAT }}
+          token: ${{ secrets.ORGANIZATION_PAT }}
           path: ${{ env.MANIFESTS_PATH }}
           branch: ci/app-version-${{ steps.version.outputs.value }}-${{ github.run_id }}
           base: ${{ steps.config.outputs.base }}
